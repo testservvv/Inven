@@ -1,0 +1,36 @@
+# Inventar + Caddy als Reverse-Proxy mit automatischem HTTPS (Let's Encrypt).
+# Voraussetzung: Die Domain aus der Datei .env zeigt per DNS auf diesen Server,
+# die Ports 80 und 443 sind erreichbar.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      APP_URL: https://${DOMAIN:?Bitte DOMAIN in der Datei .env setzen}
+      TRUST_PROXY: "1"
+      # Optional: MAX_UPLOAD_MB (Standard 15), BACKUP_KEEP (Standard 14), TZ (Standard Europe/Berlin)
+    volumes:
+      - inventar-data:/data
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  inventar-data:
+  caddy-data:
+  caddy-config:

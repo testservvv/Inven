@@ -1,0 +1,24 @@
+{
+  "name": "inventar",
+  "version": "1.0.0",
+  "description": "Hardware-Inventar mit Defekt- und Prüfungsverwaltung, QR-Etiketten und sicherem Login",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test \"test/*.test.js\"",
+    "cli": "node src/cli.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.8",
+    "better-sqlite3": "13.2.0",
+    "hono": "4.13.19",
+    "pdf-lib": "1.17.1",
+    "qrcode-generator": "2.0.4"
+  }
+}
