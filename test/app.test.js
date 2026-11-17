@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { Browser } from './helpers.js';
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'inventar-test-'));
 process.env.DATA_DIR = dataDir;
@@ -22,58 +23,10 @@ after(() => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-const ORIGIN = 'http://localhost';
 const PASSWORD = 'Korrekt-Pferd-Batterie-7';
 
-/** Minimal browser: keeps cookies and sends the CSRF token of the last page. */
-class Browser {
-  cookies = new Map();
-  csrf = '';
-
-  async request(url, { method = 'GET', form, headers = {} } = {}) {
-    const init = { method, headers: { ...headers }, redirect: 'manual' };
-    if (this.cookies.size > 0) init.headers.cookie = [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ');
-    if (method !== 'GET') {
-      if (!('origin' in init.headers)) init.headers.origin = ORIGIN;
-      if (form instanceof FormData) {
-        if (!form.has('_csrf')) form.set('_csrf', this.csrf);
-        init.body = form;
-      } else {
-        init.body = new URLSearchParams({ _csrf: this.csrf, ...form });
-        init.headers['content-type'] = 'application/x-www-form-urlencoded';
-      }
-    }
-    const response = await app.request(url, init);
-    for (const cookie of response.headers.getSetCookie()) {
-      const [pair] = cookie.split(';');
-      const [name, value] = [pair.slice(0, pair.indexOf('=')), pair.slice(pair.indexOf('=') + 1)];
-      if (value === '' || /max-age=0/i.test(cookie)) this.cookies.delete(name);
-      else this.cookies.set(name, value);
-    }
-    const type = response.headers.get('content-type') ?? '';
-    const body = type.includes('text/') ? await response.text() : Buffer.from(await response.arrayBuffer());
-    if (typeof body === 'string') {
-      const token = /name="_csrf" value="([^"]+)"/.exec(body)?.[1];
-      if (token) this.csrf = token;
-    }
-    return { status: response.status, location: response.headers.get('location'), headers: response.headers, body };
-  }
-
-  get(url) {
-    return this.request(url);
-  }
-
-  post(url, form = {}, headers = {}) {
-    return this.request(url, { method: 'POST', form, headers });
-  }
-
-  async login(username, password, extra = {}) {
-    return this.post('/login', { username, password, ...extra });
-  }
-}
-
-const admin = new Browser();
-const member = new Browser();
+const admin = new Browser(app);
+const member = new Browser(app);
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mNkYPhfz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC', 'base64');
 const file = (bytes, name, type) => new File([bytes], name, { type });
 
@@ -102,22 +55,22 @@ test('setup needs the token from the server log and a decent password', async ()
   assert.equal(done.location, '/');
   assert.match(done.headers.getSetCookie().join(';'), /inventar_sid=[^;]+; .*HttpOnly; .*SameSite=Lax/i);
   assert.match((await admin.get('/')).body, /Hallo Anna/);
-  assert.equal((await new Browser().get('/setup')).location, '/login', 'setup is closed afterwards');
+  assert.equal((await new Browser(app).get('/setup')).location, '/login', 'setup is closed afterwards');
 });
 
 test('pages require a login and never redirect to foreign sites', async () => {
-  const guest = new Browser();
+  const guest = new Browser(app);
   assert.equal((await guest.get('/inventar?q=x')).location, '/login?next=%2Finventar%3Fq%3Dx');
   assert.equal((await guest.post('/inventar', { name: 'x' })).status, 403);
   assert.equal((await guest.get('/dateien/00000000000000000000000000000000/x.png')).status, 302);
   assert.equal((await guest.get('/export/inventar.csv')).status, 302);
 
   for (const next of ['//evil.example', 'https://evil.example', '/\\evil.example']) {
-    const session = new Browser();
+    const session = new Browser(app);
     const result = await session.login('anna@example.de', PASSWORD, { next });
     assert.equal(result.location, '/', `next=${next} is ignored`);
   }
-  const session = new Browser();
+  const session = new Browser(app);
   assert.equal((await session.login('anna@example.de', PASSWORD, { next: '/defekte' })).location, '/defekte');
 });
 
@@ -341,7 +294,7 @@ test('CSV export can be imported again; labels are rendered as PDF', async () =>
 
 test('repeated wrong passwords lock the login for a while', async () => {
   db.exec('DELETE FROM login_throttle'); // earlier tests already produced failed attempts
-  const attacker = new Browser();
+  const attacker = new Browser(app);
   for (let i = 0; i < 5; i++) assert.equal((await attacker.login('max', `falsch-${i}`)).status, 401);
   const locked = await attacker.login('max', memberPassword);
   assert.equal(locked.status, 429, 'even the right password is refused while locked');
@@ -361,7 +314,7 @@ test('two-factor login with authenticator codes and recovery codes', async () =>
   assert.equal(codes.length, 10);
   assert.doesNotMatch(db.prepare('SELECT totp_secret FROM users WHERE id = 1').get().totp_secret, new RegExp(secret), 'the secret is stored encrypted');
 
-  const session = new Browser();
+  const session = new Browser(app);
   const first = await session.login('anna@example.de', PASSWORD, { next: '/defekte' });
   assert.equal(first.location, '/login/code?next=%2Fdefekte');
   assert.equal((await session.get('/inventar')).status, 302, 'the password alone does not sign in');
@@ -371,16 +324,16 @@ test('two-factor login with authenticator codes and recovery codes', async () =>
   assert.equal(second.location, '/defekte');
   assert.equal((await session.get('/inventar')).status, 200);
 
-  const recovery = new Browser();
+  const recovery = new Browser(app);
   await recovery.login('anna@example.de', PASSWORD);
   assert.equal((await recovery.post('/login/code', { code: codes[0].toLowerCase() })).status, 303);
-  const again = new Browser();
+  const again = new Browser(app);
   await again.login('anna@example.de', PASSWORD);
   assert.equal((await again.post('/login/code', { code: codes[0] })).status, 401, 'recovery codes work only once');
 
   assert.equal((await admin.post('/konto/2fa/deaktivieren', { password: 'falsch' })).status, 422);
   assert.equal((await admin.post('/konto/2fa/deaktivieren', { password: PASSWORD })).status, 303);
-  assert.equal((await new Browser().login('anna@example.de', PASSWORD)).location, '/');
+  assert.equal((await new Browser(app).login('anna@example.de', PASSWORD)).location, '/');
 });
 
 test('account safety nets: last admin, deactivation, logout', async () => {
@@ -394,7 +347,7 @@ test('account safety nets: last admin, deactivation, logout', async () => {
 
   const cookie = admin.cookies.get('inventar_sid');
   assert.equal((await admin.post('/logout')).location, '/login?info=abgemeldet');
-  const stale = new Browser();
+  const stale = new Browser(app);
   stale.cookies.set('inventar_sid', cookie);
   assert.equal((await stale.get('/inventar')).status, 302, 'the old session cookie is worthless after logout');
 });

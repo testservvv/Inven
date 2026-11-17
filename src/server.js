@@ -8,7 +8,11 @@ import { createApp } from './web/app.js';
 
 const app = createApp();
 
-const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
+// Node aborts requests that take longer than 5 minutes to arrive. Uploading a
+// large backup over a slow line can take longer, so allow up to an hour.
+const serverOptions = { requestTimeout: 60 * 60_000 };
+
+const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host, serverOptions }, (info) => {
   const local = `http://localhost:${info.port}`;
   console.log(`Inventar läuft auf ${config.appUrl || local}`);
   if (config.production && !config.secureCookies) {

@@ -12,6 +12,7 @@ QR-Code direkt am Gerät eintragen.
 - **Prüfungen**: Prüfpläne je Gerät mit Intervall, Fälligkeiten, Prüfprotokoll und Nachweisen (PDF/Foto)
 - **QR-Etiketten** als PDF für A4-Etikettenbögen und Etikettendrucker; Scan öffnet die Schnellaktionen des Geräts
 - **Fotos & Belege** je Gerät, **CSV-Import und -Export**
+- **Komplettsicherung & Umzug**: alle Daten als eine Datei herunterladen und auf einem neuen Server einspielen
 - **Sicherer Login**: Rollen (Administrator/Mitarbeiter), optionale Zwei-Faktor-Anmeldung, Sperre bei Fehlversuchen
 - Helles und dunkles Design, für Handy und Desktop
 
@@ -61,7 +62,9 @@ Datenbank-Änderungen werden beim Start automatisch eingespielt.
 
 Wer bereits nginx, Traefik o. Ä. betreibt, startet nur den Dienst `app` und leitet auf Port 3000 weiter.
 Wichtig: `APP_URL` auf die öffentliche https-Adresse setzen, `TRUST_PROXY=1` setzen und den `Host`-Header
-durchreichen (nginx: `proxy_set_header Host $host;`, außerdem `client_max_body_size 50m;`).
+durchreichen (nginx: `proxy_set_header Host $host;`). Außerdem die Upload-Grenze anheben: für Fotos und Belege
+reichen 50 MB, zum Einspielen einer Komplettsicherung beim Umzug muss sie größer sein als die Sicherungsdatei
+(nginx: `client_max_body_size 4g;`, dazu `proxy_request_buffering off;`).
 
 ### Einstellungen (Umgebungsvariablen)
 
@@ -72,38 +75,84 @@ durchreichen (nginx: `proxy_set_header Host $host;`, außerdem `client_max_body_
 | `PORT`          | `3000`          | Port der Anwendung.                                                                   |
 | `DATA_DIR`      | `./data`        | Ablage für Datenbank, Uploads, Sicherungen und Schlüssel (im Container: `/data`).      |
 | `MAX_UPLOAD_MB` | `15`            | Maximale Größe einer hochgeladenen Datei.                                             |
+| `MAX_RESTORE_MB`| `4096`          | Maximale Größe einer Komplettsicherung, die beim Umzug eingespielt werden kann.         |
 | `BACKUP_KEEP`   | `14`            | Anzahl aufbewahrter täglicher Datenbank-Sicherungen (`0` = aus).                       |
 | `SETUP_TOKEN`   | zufällig        | Fester Code für die Ersteinrichtung.                                                  |
 | `TZ`            | `Europe/Berlin` | Zeitzone für Fälligkeiten und Datumsanzeigen.                                         |
 
 ---
 
-## Datensicherung
+## Datensicherung & Umzug
 
 Alle Daten liegen im Volume `inventar-data` (im Container `/data`):
 
-| Inhalt             | Bedeutung                                                              |
-| ------------------ | ---------------------------------------------------------------------- |
-| `inventar.sqlite`  | Datenbank                                                              |
-| `uploads/`         | Fotos und Belege                                                       |
-| `backups/`         | automatische tägliche Kopien der Datenbank                             |
+| Inhalt             | Bedeutung                                                                  |
+| ------------------ | -------------------------------------------------------------------------- |
+| `inventar.sqlite`  | Datenbank                                                                  |
+| `uploads/`         | Fotos und Belege                                                           |
+| `backups/`         | automatische tägliche Kopien der Datenbank                                 |
 | `app.key`          | Schlüssel, mit dem die 2FA-Geheimnisse in der Datenbank verschlüsselt sind |
 
-Die automatischen Kopien schützen vor versehentlichem Löschen, **nicht** vor einem Ausfall des Servers.
-Deshalb regelmäßig den gesamten Ordner auf ein anderes System kopieren, z. B. per Cronjob:
+### Komplettsicherung
+
+Unter **Einstellungen → Datensicherung & Umzug** lädt ein Administrator nach Eingabe seines Passworts eine
+einzelne Datei `inventar-sicherung-JJJJ-MM-TT.tar.gz` herunter. Sie enthält alles: Datenbank, sämtliche
+Fotos und Belege sowie `app.key`. Es ist ein gewöhnliches tar-Archiv, das sich mit jedem Packprogramm öffnen lässt.
+
+Die Datei enthält auch die Anmeldedaten aller Nutzer (Passwörter nur als nicht umkehrbarer Hash) und sollte
+entsprechend sicher aufbewahrt werden.
+
+Für eine regelmäßige Sicherung auf einem anderen System, z. B. per Cronjob, schreibt dieser Befehl die
+Komplettsicherung direkt in eine Datei auf dem Server:
 
 ```bash
-docker compose exec app node src/cli.js backup
+docker compose exec -T app node src/cli.js sicherung-erstellen - > inventar-sicherung-$(date +%F).tar.gz
+```
+
+### Umzug auf einen anderen Server
+
+1. **Alter Server:** Unter *Einstellungen → Datensicherung & Umzug* die Komplettsicherung herunterladen.
+2. **Neuer Server:** Die Anwendung wie oben beschrieben installieren und den Einrichtungslink aus
+   `docker compose logs app` öffnen.
+3. Statt ein Konto anzulegen, **„Umzug: Komplettsicherung einspielen“** aufklappen, den Einrichtungscode
+   eintragen, die Datei auswählen und einspielen.
+4. Mit dem bisherigen Konto anmelden: Passwörter und Zwei-Faktor-Anmeldung gelten weiter.
+
+Gut zu wissen:
+
+- Eine Sicherung lässt sich **nur in eine frische Installation** (noch ohne Konto) einspielen. Bestehende Daten
+  können so nicht versehentlich überschrieben werden. Ist die Datei beschädigt oder unvollständig, wird nichts
+  verändert.
+- Nach dem Umzug melden sich alle Nutzer einmal neu an.
+- **Gleiche Domain:** Nur den DNS-Eintrag auf den neuen Server umstellen; alle gedruckten QR-Etiketten bleiben gültig.
+  **Neue Domain:** Die QR-Codes enthalten die alte Adresse – Etiketten neu drucken.
+- Eine Sicherung aus einer älteren Programmversion kann in eine neuere eingespielt werden (die Datenbank wird
+  automatisch angepasst), umgekehrt nicht.
+- Größtmögliche Datei: `MAX_RESTORE_MB` (Standard 4096 MB). Läuft ein eigener Reverse-Proxy vor der Anwendung,
+  muss auch dessen Upload-Grenze groß genug sein (nginx: `client_max_body_size`). Der mitgelieferte Caddy hat keine Grenze.
+
+Auch nach einem Totalausfall des Servers ist das der Weg zurück: neu installieren, Sicherung einspielen.
+
+### Automatische Tagessicherungen
+
+Zusätzlich legt die Anwendung täglich eine Kopie der Datenbank in `backups/` ab. Diese Kopien schützen vor
+versehentlichem Löschen, **nicht** vor einem Ausfall des Servers (dafür die Komplettsicherung).
+Einen Tagesstand zurückholen (`JJJJ-MM-TT` durch das gewünschte Datum ersetzen):
+
+```bash
+docker compose stop app
 ```
 
 ```bash
-docker compose cp app:/data ./inventar-sicherung-$(date +%F)
+docker compose run --rm --no-deps app sh -c 'cp /data/backups/inventar-JJJJ-MM-TT.sqlite /data/inventar.sqlite && rm -f /data/inventar.sqlite-wal /data/inventar.sqlite-shm'
 ```
 
-Wiederherstellen: Anwendung stoppen (`docker compose stop app`), den gesicherten Ordner mit
-`docker compose cp ./inventar-sicherung-JJJJ-MM-TT/. app:/data` zurückkopieren, wieder starten. Soll ein einzelner
-Tagesstand zurückgeholt werden, ersetzt man `inventar.sqlite` durch die gewünschte Datei aus `backups/`
-(dabei die Dateien `inventar.sqlite-wal` und `inventar.sqlite-shm` löschen).
+```bash
+docker compose start app
+```
+
+Fotos und Belege sind in den Tagessicherungen nicht enthalten; sie werden ohnehin nur gelöscht, wenn jemand sie
+ausdrücklich löscht.
 
 ---
 

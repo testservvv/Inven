@@ -22,6 +22,11 @@ function appKey() {
   return key;
 }
 
+/** Re-read the key file on next use (after a backup with another key was restored). */
+export function forgetKey() {
+  key = undefined;
+}
+
 export function seal(plaintext) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', appKey(), iv);

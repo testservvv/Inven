@@ -141,6 +141,8 @@ export function createApp() {
         message: 'Die Anfrage kam nicht von dieser Anwendung und wurde abgelehnt. Falls das unerwartet ist: In der Server-Konfiguration muss APP_URL der Adresse entsprechen, unter der die Anwendung aufgerufen wird.',
       });
     }
+    // Restoring a backup streams its (large) body itself and enforces its own limit.
+    if (c.req.path === '/setup/wiederherstellen') return next();
     const multipart = (c.req.header('content-type') || '').startsWith('multipart/form-data');
     return (multipart && c.get('user') ? uploadLimit : formLimit)(c, next);
   });
@@ -149,7 +151,7 @@ export function createApp() {
   let installed = false;
   app.use('*', (c, next) => {
     installed ||= countUsers() > 0;
-    if (!installed && c.req.path !== '/setup') return c.redirect('/setup', 302);
+    if (!installed && !c.req.path.startsWith('/setup')) return c.redirect('/setup', 302);
     return next();
   });
 

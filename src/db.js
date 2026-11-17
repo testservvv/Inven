@@ -7,11 +7,18 @@ for (const dir of [config.dataDir, paths.uploads, paths.backups, paths.tmp]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
-export const db = new Database(paths.database);
-db.pragma('journal_mode = WAL');
-db.pragma('synchronous = NORMAL');
-db.pragma('foreign_keys = ON');
-db.pragma('busy_timeout = 5000');
+function openDatabase() {
+  const connection = new Database(paths.database);
+  connection.pragma('journal_mode = WAL');
+  connection.pragma('synchronous = NORMAL');
+  connection.pragma('foreign_keys = ON');
+  connection.pragma('busy_timeout = 5000');
+  return connection;
+}
+
+// `let` so that restoring a backup can swap the connection; importers see the
+// new value through the ES module live binding.
+export let db = openDatabase();
 
 // Prepared statements are cached by SQL text. List pages build SQL dynamically
 // (filters, sorting), so the cache is capped to stay bounded.
@@ -235,6 +242,26 @@ const migrations = [
   CREATE INDEX events_created ON events(created_at);
   `,
 ];
+
+/** Highest schema version this program knows. */
+export const SCHEMA_VERSION = migrations.length;
+
+/**
+ * Replaces the database file with `file` (e.g. from a restored backup) and
+ * reopens the connection. Runs synchronously, so no request can use the
+ * database in between.
+ */
+export function replaceDatabase(file) {
+  statements.clear();
+  db.close();
+  try {
+    for (const suffix of ['-wal', '-shm', '-journal']) fs.rmSync(`${paths.database}${suffix}`, { force: true });
+    fs.renameSync(file, paths.database);
+  } finally {
+    db = openDatabase();
+  }
+  migrate();
+}
 
 export function migrate() {
   const current = db.pragma('user_version', { simple: true });

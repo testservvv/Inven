@@ -1,12 +1,16 @@
 // Admin: settings and activity log.
+import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { html } from 'hono/html';
 import { config } from '../../config.js';
 import { getSetting, setSetting } from '../../services/settings.js';
 import { listEvents, logEvent } from '../../services/events.js';
+import { confirmPassword } from '../../services/auth.js';
+import { createArchive, estimateSize } from '../../services/transfer.js';
 import { cleanText, formatBytes } from '../../lib/format.js';
 import { page } from '../layout.js';
-import { pageParam, publicOrigin, readForm, redirect, requireAdmin } from '../http.js';
+import { clientIp, pageParam, publicOrigin, readForm, redirect, requireAdmin } from '../http.js';
+import { icon } from '../icons.js';
 import { alert, card, csrfField, details, emptyState, errorSummary, field, pageHeader, pagination } from '../ui.js';
 import { timeline } from '../views/shared.js';
 
@@ -14,7 +18,28 @@ export const adminRoutes = new Hono();
 adminRoutes.use('/einstellungen', requireAdmin);
 adminRoutes.use('/aktivitaet', requireAdmin);
 
-function settingsPage(c, { values, errors = {} }, status = 200) {
+function backupCard(c, error = '') {
+  return card({
+    title: 'Datensicherung & Umzug',
+    id: 'sicherung',
+    body: html`<p>Die Komplettsicherung ist eine einzelne Datei mit allen Daten: Geräte, Prüfungen, Defekte, Fotos und Belege,
+        Nutzerkonten sowie der Schlüssel für die Zwei-Faktor-Anmeldung. Damit lässt sich das Inventar vollständig auf einen
+        anderen Server umziehen oder nach einem Ausfall wiederherstellen.</p>
+      <p class="muted small">Einspielen: Auf dem neuen Server bei der Ersteinrichtung „Umzug: Komplettsicherung einspielen“ wählen.
+        Behält der neue Server dieselbe Adresse (APP_URL), bleiben alle gedruckten QR-Etiketten gültig.</p>
+      ${alert('Die Datei enthält sämtliche Daten einschließlich der Anmeldedaten aller Nutzer (Passwörter nur als nicht umkehrbarer Hash). Bitte so sorgfältig aufbewahren wie einen Generalschlüssel.', 'warning', 'shield')}
+      <form method="post" action="/einstellungen/sicherung" class="form form--inline">
+        ${csrfField(c)}
+        ${field({ label: 'Dein Passwort zur Bestätigung', name: 'password', id: 'f-backup-password', type: 'password', required: true, error, attributes: { autocomplete: 'current-password' } })}
+        <button type="submit" class="btn btn--primary">${icon('download', { size: 16 })}Komplettsicherung herunterladen</button>
+      </form>
+      <p class="muted small">Ungefähre Größe: ${formatBytes(estimateSize())} (vor der Komprimierung)</p>`,
+  });
+}
+
+const currentSettings = () => ({ company_name: getSetting('company_name'), inventory_prefix: getSetting('inventory_prefix'), warn_days: getSetting('warn_days') });
+
+function settingsPage(c, { values, errors = {}, backupError = '' }, status = 200) {
   const content = html`${pageHeader({ title: 'Einstellungen' })}
     <div class="stack">
       <form method="post" action="/einstellungen" class="card form form--page">
@@ -35,13 +60,26 @@ function settingsPage(c, { values, errors = {} }, status = 200) {
           ])}
           ${config.secureCookies ? '' : alert(html`Für den Betrieb im Internet muss <strong>APP_URL</strong> auf eine https-Adresse gesetzt sein – erst dann werden Sitzungs-Cookies nur verschlüsselt übertragen. Die QR-Codes enthalten die oben angezeigte Adresse.`, 'warning', 'circle-alert')}`,
       })}
+      ${backupCard(c, backupError)}
     </div>`;
   return page(c, { title: 'Einstellungen', active: 'settings', narrow: true, content }, status);
 }
 
-adminRoutes.get('/einstellungen', (c) =>
-  settingsPage(c, { values: { company_name: getSetting('company_name'), inventory_prefix: getSetting('inventory_prefix'), warn_days: getSetting('warn_days') } }),
-);
+adminRoutes.get('/einstellungen', (c) => settingsPage(c, { values: currentSettings() }));
+
+adminRoutes.post('/einstellungen/sicherung', requireAdmin, async (c) => {
+  const user = c.get('user');
+  if (!(await confirmPassword(user, (await readForm(c)).text('password'), clientIp(c)))) {
+    return settingsPage(c, { values: currentSettings(), backupError: 'Das Passwort stimmt nicht.' }, 422);
+  }
+  const archive = await createArchive();
+  const { assets, attachments, users } = archive.manifest.counts;
+  logEvent({ user, action: 'backup.created', detail: `${assets} Geräte, ${users} Nutzer, ${attachments} Dateien` });
+  return c.body(Readable.toWeb(archive.stream), 200, {
+    'Content-Type': 'application/gzip',
+    'Content-Disposition': `attachment; filename="${archive.filename}"`,
+  });
+});
 
 adminRoutes.post('/einstellungen', async (c) => {
   const input = (await readForm(c)).values();

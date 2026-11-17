@@ -279,6 +279,77 @@
     sync();
   }
 
+  // --- Setup: upload a complete backup with progress display --------------------------------------------
+  function initRestore() {
+    const form = $('form[data-restore-form]');
+    if (!form) return;
+    const status = $('[data-restore-status]', form);
+    const progress = $('[data-restore-progress]', form);
+    const button = $('button[type="submit"]', form);
+    const say = (text, error = false) => {
+      status.textContent = text;
+      status.classList.toggle('text-danger', error);
+    };
+
+    const upload = (file, token) =>
+      new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', form.action);
+        xhr.setRequestHeader('Content-Type', 'application/gzip');
+        xhr.setRequestHeader('X-Setup-Token', token);
+        xhr.upload.addEventListener('progress', (event) => {
+          if (!event.lengthComputable) return;
+          if (event.loaded < event.total) {
+            progress.value = Math.round((event.loaded / event.total) * 100);
+            say(`Wird hochgeladen … ${progress.value} %`);
+          } else {
+            progress.removeAttribute('value'); // indeterminate while the server works
+            say('Sicherung wird geprüft und eingespielt …');
+          }
+        });
+        xhr.addEventListener('load', () => {
+          let body = {};
+          try {
+            body = JSON.parse(xhr.responseText);
+          } catch {
+            // Non-JSON answer (e.g. from a proxy): handled below.
+          }
+          if (xhr.status === 200 && body.ok) resolve(body);
+          else if (xhr.status === 413 && !body.error) reject(new Error('Die Datei ist für den Webserver zu groß. Bitte dessen Upload-Grenze erhöhen (siehe README).'));
+          else reject(new Error(body.error || `Das Einspielen ist fehlgeschlagen (Fehler ${xhr.status}).`));
+        });
+        xhr.addEventListener('error', () => reject(new Error('Die Verbindung wurde unterbrochen. Bitte erneut versuchen.')));
+        xhr.send(file);
+      });
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const file = form.elements.file.files[0];
+      const token = form.elements.token.value.trim();
+      const limit = Number(form.dataset.maxBytes);
+      if (!file) return say('Bitte die Sicherungsdatei auswählen.', true);
+      if (limit && file.size > limit) return say(`Die Datei ist größer als die eingestellte Grenze von ${form.dataset.maxLabel}.`, true);
+      button.disabled = true;
+      say('Einrichtungscode wird geprüft …');
+      try {
+        const check = await fetch(`${form.action}/pruefen`, { method: 'POST', headers: { 'X-Setup-Token': token } });
+        const answer = await check.json().catch(() => ({}));
+        if (!check.ok) throw new Error(answer.error || 'Die Prüfung ist fehlgeschlagen.');
+        progress.hidden = false;
+        progress.value = 0;
+        const result = await upload(file, token);
+        const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+        progress.value = 100;
+        say(`Fertig: ${count(result.summary.assets, 'Gerät', 'Geräte')} und ${count(result.summary.users, 'Konto', 'Konten')} übernommen. Weiter zur Anmeldung …`);
+        setTimeout(() => location.assign(result.redirect), 1200);
+      } catch (error) {
+        progress.hidden = true;
+        button.disabled = false;
+        say(error.message, true);
+      }
+    });
+  }
+
   // --- "/" focuses the search field -------------------------------------------------------------------------
   function initShortcuts() {
     document.addEventListener('keydown', (event) => {
@@ -304,6 +375,7 @@
     initCopy();
     initDropdowns();
     initLabels();
+    initRestore();
     initShortcuts();
   }
 

@@ -132,3 +132,45 @@ test('uploads are recognised by content, not by name', () => {
   assert.equal(sniffType(Buffer.from('<html><script>')), null);
   assert.equal(sniffType(Buffer.from('MZ\x90\x00')), null);
 });
+
+test('tar archives round-trip, even when the input arrives byte by byte', async () => {
+  const { Readable, Writable } = await import('node:stream');
+  const { pipeline } = await import('node:stream/promises');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { TarExtractor, tarStream } = await import('../src/lib/tar.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tar-test-'));
+  try {
+    const sizes = [0, 1, 511, 512, 513, 70_000];
+    const source = sizes.map((size, i) => {
+      const file = path.join(dir, `in-${i}`);
+      fs.writeFileSync(file, Buffer.alloc(size, i + 1));
+      return { name: `ordner/datei-${i}`, path: file };
+    });
+    const entries = [{ name: 'info.json', data: Buffer.from('{"a":1}') }, ...source, { name: 'fehlt', path: path.join(dir, 'gibt-es-nicht') }];
+    const chunks = [];
+    await pipeline(Readable.from(tarStream(entries), { objectMode: false }), new Writable({ write(chunk, _e, cb) { chunks.push(chunk); cb(); } }));
+    const archive = Buffer.concat(chunks);
+    assert.equal(archive.length % 512, 0);
+
+    const seen = [];
+    const extractor = new TarExtractor({
+      open(name, size) {
+        seen.push([name, size]);
+        return fs.openSync(path.join(dir, `out-${seen.length}`), 'w');
+      },
+    });
+    const byteByByte = Readable.from((function* () { for (let i = 0; i < archive.length; i += 97) yield archive.subarray(i, i + 97); })(), { objectMode: false });
+    await pipeline(byteByByte, extractor);
+    assert.deepEqual(seen, [['info.json', 7], ...sizes.map((size, i) => [`ordner/datei-${i}`, size])], 'missing files are skipped');
+    sizes.forEach((size, i) => assert.deepEqual(fs.readFileSync(path.join(dir, `out-${i + 2}`)), Buffer.alloc(size, i + 1)));
+
+    await assert.rejects(pipeline(Readable.from([archive.subarray(0, 1500)]), new TarExtractor({ open: () => null })), /unvollständig/);
+    const broken = Buffer.from(archive);
+    broken[10] ^= 0xff;
+    await assert.rejects(pipeline(Readable.from([broken]), new TarExtractor({ open: () => null })), /Prüfsumme/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

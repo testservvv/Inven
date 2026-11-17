@@ -50,6 +50,8 @@ export const config = {
   trustProxy: int('TRUST_PROXY', 0),
 
   maxUploadBytes: int('MAX_UPLOAD_MB', 15) * 1024 * 1024,
+  /** Largest backup archive that can be restored through the browser. */
+  maxRestoreBytes: int('MAX_RESTORE_MB', 4096) * 1024 * 1024,
   /** Number of daily database snapshots to keep (0 disables the automatic backup). */
   backupKeep: int('BACKUP_KEEP', 14),
   /** Optional fixed token for the first-run setup; generated and logged when empty. */

@@ -7,9 +7,11 @@
 //   node src/cli.js 2fa-entfernen <benutzername>
 //   node src/cli.js admin <benutzername>        make the account an active administrator
 //   node src/cli.js backup                      write a database snapshot now
+//   node src/cli.js sicherung-erstellen <datei|->  complete backup (.tar.gz), "-" = stdout
 import { db, run } from './db.js';
 import { destroyAllSessions, disableTotp, unlockUser } from './services/auth.js';
 import { snapshot } from './services/backup.js';
+import { writeArchive } from './services/transfer.js';
 import { findUserByUsername, listUsers, setPassword } from './services/users.js';
 import { temporaryPassword } from './lib/security.js';
 import { ROLE } from './lib/terms.js';
@@ -56,8 +58,18 @@ switch (command) {
   case 'backup':
     console.log(`Sicherung geschrieben: ${await snapshot({ force: true })}`);
     break;
+  case 'sicherung-erstellen': {
+    if (!username) {
+      console.error('Bitte eine Zieldatei angeben, oder „-“ für die Standardausgabe.');
+      process.exit(1);
+    }
+    const manifest = await writeArchive(username);
+    // Messages go to stderr so that "-" (stdout) stays a clean archive.
+    console.error(`Komplettsicherung erstellt: ${manifest.counts.assets} Geräte, ${manifest.counts.users} Nutzer, ${manifest.counts.attachments} Dateien.`);
+    break;
+  }
   default:
-    console.log('Befehle: nutzer | passwort <benutzername> | 2fa-entfernen <benutzername> | admin <benutzername> | backup');
+    console.log('Befehle: nutzer | passwort <benutzername> | 2fa-entfernen <benutzername> | admin <benutzername> | backup | sicherung-erstellen <datei|->');
     process.exitCode = command ? 1 : 0;
 }
 

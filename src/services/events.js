@@ -29,6 +29,8 @@ export const ACTION_LABEL = {
   'auth.2fa_disabled': 'Zwei-Faktor-Schutz deaktiviert',
   'import.completed': 'CSV-Import',
   'settings.updated': 'Einstellungen geändert',
+  'backup.created': 'Komplettsicherung heruntergeladen',
+  'backup.restored': 'Sicherung eingespielt',
   'masterdata.updated': 'Stammdaten geändert',
 };
 

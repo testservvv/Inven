@@ -1,4 +1,5 @@
 // Public routes: first-run setup, login, second factor.
+import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { html } from 'hono/html';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
@@ -16,9 +17,10 @@ import {
 } from '../../services/auth.js';
 import { countUsers, createUser, passwordProblem, validateProfile } from '../../services/users.js';
 import { setSetting } from '../../services/settings.js';
+import { RestoreError, restoreArchive } from '../../services/transfer.js';
 import { logEvent } from '../../services/events.js';
 import { PASSWORD_MIN_LENGTH, safeEqual } from '../../lib/security.js';
-import { cleanText } from '../../lib/format.js';
+import { cleanText, formatBytes, formatTimestampDate } from '../../lib/format.js';
 import { barePage } from '../layout.js';
 import { clientIp, readForm, safeNext } from '../http.js';
 import { alert, checkbox, errorSummary, field } from '../ui.js';
@@ -53,6 +55,7 @@ const NOTICES = {
   abgemeldet: 'Du wurdest abgemeldet.',
   passwort: 'Das Passwort wurde geändert. Bitte neu anmelden.',
   abgelaufen: 'Die Anmeldung ist abgelaufen. Bitte erneut anmelden.',
+  wiederhergestellt: 'Die Sicherung wurde eingespielt. Bitte mit einem bestehenden Konto anmelden.',
 };
 
 function loginPage(c, { username = '', next = '/', error = '', notice = '', remember = false }, status = 200) {
@@ -95,6 +98,29 @@ function codePage(c, { next, error = '' }, status = 200) {
   );
 }
 
+/** Alternative to creating an account: bring in a complete backup from another server. */
+function restoreCard(token) {
+  return html`<section class="card card--auth card--restore">
+    <details class="inline-edit">
+      <summary>${icon('hard-drive-download', { size: 16 })}Umzug: Komplettsicherung einspielen</summary>
+      <p class="muted">Du ziehst von einem anderen Server um? Dort unter <strong>Einstellungen → Datensicherung &amp; Umzug</strong>
+        eine Komplettsicherung herunterladen und hier einspielen. Geräte, Prüfungen, Defekte, Fotos, Belege und alle Konten
+        werden vollständig übernommen.</p>
+      <form method="post" action="/setup/wiederherstellen" class="form" data-restore-form data-max-bytes="${config.maxRestoreBytes}" data-max-label="${formatBytes(config.maxRestoreBytes)}">
+        ${field({ label: 'Einrichtungscode', name: 'token', id: 'f-restore-token', value: token, required: true, hint: 'Derselbe Code wie oben.', attributes: { autocomplete: 'off', spellcheck: 'false' } })}
+        <div class="field">
+          <label class="field__label" for="f-restore-file">Sicherungsdatei (.tar.gz)</label>
+          <input class="input input--file" id="f-restore-file" name="file" type="file" accept=".gz,.tgz,application/gzip" required />
+        </div>
+        <progress class="progress" max="100" value="0" hidden data-restore-progress></progress>
+        <p class="restore__status" role="status" data-restore-status></p>
+        <button type="submit" class="btn btn--block">${icon('upload', { size: 16 })}Sicherung einspielen</button>
+        <noscript>${alert('Zum Einspielen wird JavaScript benötigt.', 'warning', 'circle-alert')}</noscript>
+      </form>
+    </details>
+  </section>`;
+}
+
 function setupPage(c, { values = {}, errors = {}, token = '' }, status = 200) {
   return barePage(
     c,
@@ -112,7 +138,8 @@ function setupPage(c, { values = {}, errors = {}, token = '' }, status = 200) {
         ${field({ label: 'Passwort', name: 'password', type: 'password', required: true, error: errors.password, hint: `Mindestens ${PASSWORD_MIN_LENGTH} Zeichen. Ein längerer Satz ist besser als ein kompliziertes Wort.`, attributes: { autocomplete: 'new-password', minlength: PASSWORD_MIN_LENGTH } })}
         ${field({ label: 'Passwort wiederholen', name: 'password2', type: 'password', required: true, error: errors.password2, attributes: { autocomplete: 'new-password' } })}
         <button type="submit" class="btn btn--primary btn--block">${icon('check', { size: 16 })}Konto anlegen</button>
-      </form>`,
+      </form>
+      ${restoreCard(token)}`,
     },
     status,
   );
@@ -197,4 +224,45 @@ authRoutes.post('/login/code', async (c) => {
   deleteCookie(c, CHALLENGE_COOKIE, { path: '/', secure: config.secureCookies });
   startSession(c, result.user, Boolean(challenge.persistent));
   return c.redirect(next, 303);
+});
+
+// --- Restoring a complete backup into a fresh installation --------------------
+// The browser uploads the .tar.gz file as the raw request body (see app.js),
+// so even large archives are streamed straight to disk.
+
+function restoreGuard(c) {
+  if (countUsers() > 0) {
+    return c.json({ error: 'Diese Installation ist bereits eingerichtet. Eine Sicherung kann nur in eine frische Installation eingespielt werden.' }, 409);
+  }
+  if (!safeEqual((c.req.header('x-setup-token') ?? '').trim(), setupToken() ?? '')) {
+    return c.json({ error: 'Der Einrichtungscode stimmt nicht.' }, 403);
+  }
+  return null;
+}
+
+// Cheap check before a possibly long upload starts.
+authRoutes.post('/setup/wiederherstellen/pruefen', (c) => restoreGuard(c) ?? c.json({ ok: true }));
+
+authRoutes.post('/setup/wiederherstellen', async (c) => {
+  const refused = restoreGuard(c);
+  if (refused) return refused;
+  const type = c.req.header('content-type') ?? '';
+  if (!c.req.raw.body || type.startsWith('multipart/') || type.startsWith('application/x-www-form-urlencoded')) {
+    return c.json({ error: 'Die Sicherungsdatei muss über das Formular mit aktiviertem JavaScript hochgeladen werden.' }, 400);
+  }
+  if (Number(c.req.header('content-length') || 0) > config.maxRestoreBytes) {
+    return c.json({ error: `Die Datei ist größer als die eingestellte Grenze von ${formatBytes(config.maxRestoreBytes)} (MAX_RESTORE_MB).` }, 413);
+  }
+  try {
+    const summary = await restoreArchive(Readable.fromWeb(c.req.raw.body));
+    logEvent({
+      user: null,
+      action: 'backup.restored',
+      detail: `Sicherung vom ${formatTimestampDate(summary.createdAt)}: ${summary.assets} Geräte, ${summary.users} Nutzer, ${summary.attachments} Dateien`,
+    });
+    return c.json({ ok: true, redirect: '/login?info=wiederhergestellt', summary });
+  } catch (error) {
+    if (error instanceof RestoreError) return c.json({ error: error.message }, 422);
+    throw error;
+  }
 });

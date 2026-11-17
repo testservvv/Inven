@@ -39,6 +39,11 @@ export function deleteSetting(key) {
   cache = null;
 }
 
+/** Forget cached values, e.g. after the database was replaced. */
+export function reloadSettings() {
+  cache = null;
+}
+
 export const companyName = () => getSetting('company_name');
 
 export function warnDays() {
